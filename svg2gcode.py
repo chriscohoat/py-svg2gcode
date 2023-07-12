@@ -14,6 +14,9 @@ from config import *
 DEBUGGING = True
 SVG = set(["rect", "circle", "ellipse", "line", "polyline", "polygon", "path"])
 
+DEFAULT_UP_AND_DOWN_DISTANCE_MM = 10
+DEFAULT_UP_AND_DOWN_FEED_RATE_MM_PER_MINUTE = 1000  # mm/min
+
 
 def generate_gcode(filename):
     """The main method that converts svg files into gcode files.
@@ -103,7 +106,103 @@ def generate_gcode(filename):
     gcode += preamble + "\n"
 
     # Iterate through svg elements
+
+    all_elements = []
+
+    min_x = None
+    min_y = None
+
+    max_x = None
+    max_y = None
+
     for elem in root.iter():
+        try:
+            tag_suffix = elem.tag.split("}")[-1]
+        except:
+            print("Error reading tag value:", tag_suffix)
+            all_elements.append({})
+            continue
+        if tag_suffix in SVG:
+            shape_class = getattr(shapes_pkg, tag_suffix)
+            shape_obj = shape_class(elem)
+
+            d = shape_obj.d_path()
+            m = shape_obj.transformation_matrix()
+
+            if d:
+                points = point_generator(d, m, smoothness)
+
+                list_of_x_y_points = []
+
+                for x, y in points:
+                    x = scale * x
+                    y = bed_max_y - scale * y
+                    list_of_x_y_points.append({"x": x, "y": y})
+                    if max_x is None or x > max_x:
+                        max_x = x
+                    if max_y is None or y > max_y:
+                        max_y = y
+                    if min_x is None or x < min_x:
+                        min_x = x
+                    if min_y is None or y < min_y:
+                        min_y = y
+
+                all_elements.append(
+                    {
+                        "first_point": list_of_x_y_points[1],
+                        "points": list_of_x_y_points,
+                    }
+                )
+            else:
+                all_elements.append({})
+        else:
+            all_elements.append({})
+
+    print("min_x", min_x)
+    print("min_y", min_y)
+    print("max_x", max_x)
+    print("max_y", max_y)
+
+    # Before we do anything let's go from the starting point
+    # to the highest X, Y but make a rectangle.
+    # This will help position the work piece.
+
+    relative_rectangle_points = [
+        {
+            "x": min_x,
+            "y": min_y,
+        },
+        {
+            "x": min_x,
+            "y": max_y,
+        },
+        {
+            "x": max_x,
+            "y": max_y,
+        },
+        {
+            "x": max_x,
+            "y": min_y,
+        },
+        {
+            "x": min_x,
+            "y": min_y,
+        },
+    ]
+
+    gcode += "\n\nG90 ; absolute mode\n"
+
+    for point in relative_rectangle_points:
+        gcode += "G1 X%0.1f Y%0.1f ; alignment verification point\n" % (
+            point["x"],
+            point["y"],
+        )
+
+    gcode += "G90 ; absolute mode\n\n\n"
+
+    # Iterate through svg elements
+
+    for counter, elem in enumerate(root.iter()):
         log += debug_log("--Found Elem: " + str(elem))
         new_shape = True
         try:
@@ -157,11 +256,69 @@ def generate_gcode(filename):
 
                     if x >= 0 and x <= bed_max_x and y >= 0 and y <= bed_max_y:
                         if new_shape:
-                            gcode += "G0 X%0.1f Y%0.1f\n" % (x, y)
-                            gcode += "M03\n"
+                            #
+                            # gcode += "G0 X%0.1f Y%0.1f ; Move to Start\n" % (x, y)
+                            # The above line is old. Now we need to jog up in the Z
+                            # and move to the next shape.
+                            #
+                            # I think this may be because of the way VCarve
+                            # generates shapes?
+                            #
+                            """"""
+                            gcode += "G91 ; relative mode\n"
+                            gcode += "$J=G21G91Z{}F{} ; move up\n".format(
+                                DEFAULT_UP_AND_DOWN_DISTANCE_MM,
+                                DEFAULT_UP_AND_DOWN_FEED_RATE_MM_PER_MINUTE,
+                            )
+                            # Get the next shape (using counter and all_elements):
+                            if counter > 0:  # < len(all_elements) - 1:
+                                """
+                                next_point = all_elements[counter + 1].get(
+                                    "first_point", None
+                                )
+                                if next_point:
+                                    next_point_x = next_point["x"]
+                                    next_point_y = next_point["y"]
+                                    gcode += (
+                                        "G0 X%0.1f Y%0.1f ; Move to next point (first_point, counter %d)\n"
+                                        % (
+                                            next_point_x,
+                                            next_point_y,
+                                            counter,
+                                        )
+                                    )
+                                """
+                                first_point = all_elements[counter].get(
+                                    "first_point", None
+                                )
+                                gcode += ";;;; Setting Up ;;;; \n"
+                                if first_point:
+                                    next_point_x = first_point["x"]
+                                    next_point_y = first_point["y"]
+                                    gcode += "G90 ; absolute mode\n"
+                                    gcode += (
+                                        "G0 X%0.1f Y%0.1f ; Move to next shape and next point\n"
+                                        % (
+                                            next_point_x,
+                                            next_point_y,
+                                        )
+                                    )
+                                else:
+                                    gcode += ";;;; No point to go to ;;;; \n"
+                                gcode += ";;;; End Setting Up ;;;; \n"
+                            # Move down:
+                            gcode += "G91 ; relative mode\n"
+                            gcode += "$J=G21G91Z-{}F{} ; move down\n".format(
+                                DEFAULT_UP_AND_DOWN_DISTANCE_MM,
+                                DEFAULT_UP_AND_DOWN_FEED_RATE_MM_PER_MINUTE,
+                            )
+                            # back to absolute mode
+                            gcode += "G90 ; absolute mode\n"
+                            # Start the spindle
+                            gcode += "M03 ; Start Spindle\n"
                             new_shape = False
                         else:
-                            gcode += "G0 X%0.1f Y%0.1f\n" % (x, y)
+                            gcode += "G0 X%0.1f Y%0.1f ; Move to Point\n" % (x, y)
                         log += debug_log("\t    --Point printed")
                     else:
                         log += debug_log(
